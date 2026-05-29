@@ -1,3 +1,4 @@
+package Client;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
@@ -8,6 +9,8 @@ import java.net.Socket;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Scanner;
+
+import Protocol.Protocol;
 
 /*
  * Cliente TCP de transferência de arquivos.
@@ -24,14 +27,14 @@ import java.util.Scanner;
 public class Client {
 
     private final String serverHost; // Host do servidor informado pelo usuário
-    private final int    serverPort; // Porta do servidor
+    private final int serverPort;    // Porta do servidor
 
     private static final String EXIT_COMMAND = "sair"; // Comando que encerra o cliente
 
-    private Socket           socket;  // Socket TCP do cliente
-    private DataInputStream  in;      // Stream de leitura de dados primitivos do servidor
-    private DataOutputStream out;     // Stream de escrita de dados primitivos para o servidor
-    private final Scanner    scanner; // Leitura da entrada do usuário no console
+    private Socket socket;         // Socket TCP do cliente
+    private DataInputStream in;    // Stream de leitura de dados primitivos do servidor
+    private DataOutputStream out;  // Stream de escrita de dados primitivos para o servidor
+    private final Scanner scanner; // Leitura da entrada do usuário no console
 
     public Client() throws IOException {
         this.scanner = new Scanner(System.in);
@@ -49,8 +52,8 @@ public class Client {
 
         // Abre a conexão TCP com o servidor:
         this.socket = new Socket(serverHost, serverPort);
-        this.in     = new DataInputStream(socket.getInputStream());
-        this.out    = new DataOutputStream(socket.getOutputStream());
+        this.in = new DataInputStream(socket.getInputStream());
+        this.out = new DataOutputStream(socket.getOutputStream());
     }
 
     // ---- Envio de comandos ----
@@ -81,8 +84,8 @@ public class Client {
         }
 
         if (response.equals(Protocol.RESP_OK)) {
-            String expectedHash = in.readUTF();  // Hash SHA-256 calculado pelo servidor
-            long   fileSize     = in.readLong(); // Tamanho total do arquivo em bytes
+            String expectedHash = in.readUTF(); // Hash SHA-256 calculado pelo servidor
+            long fileSize = in.readLong(); // Tamanho total do arquivo em bytes
 
             System.out.println("[Cliente] Servidor confirmou arquivo. Tamanho: " + fileSize + " bytes");
             System.out.println("[Cliente] Hash esperado: " + expectedHash);
@@ -95,9 +98,9 @@ public class Client {
     private void receiveFile(String filename, long fileSize, String expectedHash) throws IOException {
         String outputPath = "received_" + filename;
 
-        FileOutputStream fos      = new FileOutputStream(outputPath);
-        long             received = 0;
-        int              chunkIndex = 0;
+        FileOutputStream fos = new FileOutputStream(outputPath);
+        long received = 0;
+        int chunkIndex = 0;
 
         // Lê chunks até encontrar o sentinela (-1 no campo de tamanho):
         while (true) {
@@ -143,8 +146,8 @@ public class Client {
     private String calculateSHA256(File file) throws IOException {
         try {
             MessageDigest digest = MessageDigest.getInstance(Protocol.HASH_ALGORITHM);
-            FileInputStream fis  = new FileInputStream(file);
-            byte[] buffer        = new byte[Protocol.CHUNK_SIZE];
+            FileInputStream fis = new FileInputStream(file);
+            byte[] buffer = new byte[Protocol.CHUNK_SIZE];
             int bytesRead;
 
             // Alimenta o digest incrementalmente, bloco a bloco:
@@ -155,8 +158,8 @@ public class Client {
             fis.close();
 
             // Converte o array de bytes do digest para uma string hexadecimal legível:
-            byte[]        hashBytes = digest.digest();
-            StringBuilder sb        = new StringBuilder();
+            byte[] hashBytes = digest.digest();
+            StringBuilder sb = new StringBuilder();
             for (byte b : hashBytes) {
                 sb.append(String.format("%02x", b));
             }
