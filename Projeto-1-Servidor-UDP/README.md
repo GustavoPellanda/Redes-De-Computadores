@@ -1,6 +1,8 @@
-# Visão geral do protocolo
+# Visão geral do projeto
 
-O protocolo opera inteiramente sobre UDP e define sua própria camada de confiabilidade. Toda comunicação entre cliente e servidor — incluindo requisições, respostas de controle, dados e erros — é encapsulada em pacotes binários do tipo `Packet`. Não há troca de mensagens textuais em nenhuma etapa.
+Este projeto implementa um sistema distribuído de transferência confiável de arquivos sobre UDP em Java, composto por um servidor multi-cliente concorrente e clientes capazes de solicitar arquivos remotamente, receber segmentos de dados fora de ordem, detectar perdas durante a transmissão e recuperar automaticamente os dados ausentes por meio de retransmissão seletiva. Diferentemente de aplicações tradicionais baseadas em TCP, toda a lógica de confiabilidade é implementada manualmente na camada de aplicação, incluindo segmentação de arquivos, numeração de sequência, detecção de corrupção, retransmissão de pacotes perdidos e verificação de integridade ponta a ponta.
+
+O sistema utiliza um protocolo binário próprio baseado em datagramas tipados (Packet), responsável por encapsular tanto mensagens de controle quanto segmentos de dados em um formato compacto e determinístico. O servidor opera sobre um único socket UDP compartilhado entre múltiplos clientes simultâneos, utilizando demultiplexação por sessão e processamento concorrente com thread pool para permitir transferências paralelas independentes. O protocolo também implementa um mecanismo de retransmissão seletiva baseado em bitmap de NACK, no qual o cliente solicita exclusivamente os segmentos faltantes, reduzindo overhead de rede e evitando retransmissões completas desnecessárias.
 
 ---
 
