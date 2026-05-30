@@ -3,11 +3,11 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.List;
 
-import Protocol.Protocol;
 import Protocol.Frame;
+import Protocol.Protocol;
 
 /*
- * Encapsula toda a lógica de chat do servidor:
+ * Encapsula toda a lógica de mensagens do servidor:
  *   - Envio de mensagens diretas a um único cliente
  *   - Broadcast para todos os clientes conectados
  *   - Geração das respostas programadas (HELP, STATUS, notificações periódicas, eventos)
@@ -15,12 +15,12 @@ import Protocol.Frame;
  * Não mantém estado de conexão — recebe a lista de handlers do servidor e delega
  * a escrita de bytes ao Frame. Assim, ClientHandler e Server permanecem focados
  * em suas responsabilidades originais.
- */
+*/
 
 public class ServerChat {
 
     private final List<ClientHandler> activeClients; // Referência à lista global de handlers
-    private final long startTimeMillis; // Instante em que o servidor foi iniciado
+    private final long startTimeMillis;              // Instante em que o servidor foi iniciado
 
     public ServerChat(List<ClientHandler> activeClients) {
         this.activeClients = activeClients;
@@ -29,10 +29,10 @@ public class ServerChat {
 
     // ----- Envio de mensagens a clientes individuais -----
 
-    // Envia uma mensagem de chat para um único cliente:
+    // Envia uma mensagem de texto para um único cliente:
     public void sendMessage(DataOutputStream out, String message) {
         try {
-            Frame.writeTextFrame(out, Protocol.FRAME_CHAT_MSG, message);
+            Frame.writeMsgFrame(out, message);
         } catch (IOException e) {
             System.err.println("[Chat] Falha ao enviar mensagem: " + e.getMessage());
         }
@@ -69,7 +69,7 @@ public class ServerChat {
     public void broadcast(String message) {
         System.out.println("[Chat] Broadcast → " + message);
 
-        // Itera sobre um snapshot da lista de handlers ativos, enviando a mensagem a cada um:
+        // Itera sobre a lista de handlers ativos e envia a mensagem para cada um:
         for (ClientHandler handler : activeClients) {
             sendMessage(handler.getOutputStream(), message);
         }

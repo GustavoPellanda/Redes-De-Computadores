@@ -22,8 +22,8 @@
    - 7.1 [Design stateless](#71-design-stateless)
    - 7.2 [Classificação das mensagens](#72-classificação-das-mensagens)
    - 7.3 [Fluxo de uma mensagem do servidor ao cliente](#73-fluxo-de-uma-mensagem-do-servidor-ao-cliente)
-8. [Protocolo de Comunicação Completo](#8-protocolo-de-comunicação-completo)
-   - 8.1 [Comandos recebidos pelo servidor](#81-comandos-recebidos-pelo-servidor)
+8. [Interpretação de Comandos no Servidor](#8-interpretação-de-comandos-no-servidor)
+   - 8.1 [Comandos reconhecidos](#81-comandos-reconhecidos)
    - 8.2 [Respostas e mensagens enviadas pelo servidor](#82-respostas-e-mensagens-enviadas-pelo-servidor)
 9. [Segurança: Prevenção de Path Traversal](#9-segurança-prevenção-de-path-traversal)
 10. [Verificação de Integridade via SHA-256](#10-verificação-de-integridade-via-sha-256)
@@ -36,7 +36,7 @@ Este projeto implementa um servidor TCP em Java capaz de atender múltiplos clie
 
 O servidor opera em escuta contínua numa porta fixa, delegando cada conexão aceita a uma thread dedicada. Um módulo de chat independente permite ao servidor enviar mensagens assíncronas — notificações de eventos, alertas periódicos e respostas a comandos específicos — para todos os clientes conectados ou para clientes individuais.
 
-A integração desses dois serviços num mesmo stream TCP exigiu a criação de um protocolo de aplicação próprio, baseado em *frames* tipados, capaz de diferenciar dados de arquivo de mensagens de texto dentro do fluxo contínuo de bytes que o TCP fornece.
+A integração desses dois serviços num mesmo stream TCP exigiu a criação de um protocolo de aplicação próprio, baseado em frames tipados, capaz de diferenciar dados de arquivo de mensagens de texto dentro do fluxo contínuo de bytes que o TCP fornece.
 
 ---
 
@@ -74,22 +74,21 @@ Implementa a camada de framing do protocolo. Oferece métodos estáticos para es
 - Abrir o `ServerSocket` e mantê-lo em escuta na porta definida em `Protocol.PORT`.
 - Executar o loop principal de aceitação, que bloqueia em `serverSocket.accept()` até um novo cliente se conectar.
 - Para cada conexão aceita, instanciar um `ClientHandler`, registrá-lo na lista global e iniciar sua thread.
-- Instanciar o `ServerChat` e mantê-lo como referência compartilhada.
+- Instanciar o `ServerChat` e mantê-lo como referência compartilhada entre todos os handlers.
 - Iniciar a thread de broadcast periódico.
 
 **`ClientHandler.java`**
 
 Implementa `Runnable`, sendo projetada para execução em thread própria. Cada instância representa a sessão de um único cliente e é inteiramente responsável por aquele canal de comunicação. Responsabilidades:
 
-- Inicializar os streams de entrada (`DataInputStream`) e saída (`DataOutputStream`) sobre o socket.
-- Executar o loop de leitura de frames, identificando o tipo de cada frame recebido e despachando para o método de tratamento adequado.
-- Processar comandos de transferência de arquivo (`GET`), incluindo validação de segurança, cálculo de hash e envio em chunks.
-- Delegar comandos de chat (`HELP`, `STATUS`) ao `ServerChat`.
+- Manter os streams de entrada (`DataInputStream`) e saída (`DataOutputStream`) sobre o socket, inicializados no construtor.
+- Executar o loop de leitura de frames, extraindo o texto de cada `FRAME_MSG` recebido e passando-o para `dispatch()`.
+- Interpretar o texto recebido e executar a ação correspondente: processar transferências de arquivo (`GET`), delegar comandos de informação (`HELP`, `STATUS`) ao `ServerChat`, ou encerrar a sessão (`EXIT`).
 - Ao encerrar a sessão, remover-se da lista global e notificar os demais clientes via `ServerChat`.
 
 **`ServerChat.java`**
 
-Encapsula toda a lógica relacionada a mensagens de chat. Não gerencia conexões nem mantém estado de sessão — opera exclusivamente sobre referências de streams e sobre a lista de clientes ativos recebida do servidor. Responsabilidades:
+Encapsula toda a lógica relacionada a mensagens. Não gerencia conexões nem mantém estado de sessão — opera exclusivamente sobre referências de streams e sobre a lista de clientes ativos recebida do servidor. Responsabilidades:
 
 - Construir e enviar mensagens de resposta a comandos específicos (`HELP`, `STATUS`).
 - Realizar broadcasts para todos os clientes conectados.
@@ -139,6 +138,8 @@ periodicBroadcast.setDaemon(true);
 periodicBroadcast.start();
 ```
 
+O campo `running` é declarado como `volatile` para garantir que a atualização feita por `stop()` — potencialmente em outra thread — seja imediatamente visível à thread do broadcast, sem risco de ela continuar em loop por ter o valor cacheado em registrador pela JVM.
+
 ---
 
 ## 4. Gerenciamento da Lista de Clientes Ativos
@@ -169,6 +170,13 @@ Sem sincronização, uma thread removendo um cliente enquanto outra itera a list
 
 Uma consequência intencional desse comportamento: se um cliente desconecta exatamente durante um broadcast em andamento, ele ainda pode receber aquela mensagem específica (pois estava no snapshot), mas não receberá as seguintes. Isso é semanticamente correto — a mensagem foi enviada enquanto o cliente ainda estava oficialmente ativo.
 
+A ordem das operações em `close()` é deliberada: o handler é removido da lista *antes* de o broadcast de desconexão ser disparado. Isso garante que o servidor não tentará escrever no socket já fechado do cliente que está saindo.
+
+```java
+activeClients.remove(this);              // Remove primeiro
+serverChat.broadcastClientDisconnected(); // Depois notifica os que restaram
+```
+
 ---
 
 ## 5. Buffers de Entrada e Saída no `ClientHandler`
@@ -176,11 +184,11 @@ Uma consequência intencional desse comportamento: se um cliente desconecta exat
 Os streams do socket são envolvidos com `DataInputStream` e `DataOutputStream`:
 
 ```java
-in  = new DataInputStream(socket.getInputStream());
-out = new DataOutputStream(socket.getOutputStream());
+this.in  = new DataInputStream(socket.getInputStream());
+this.out = new DataOutputStream(socket.getOutputStream());
 ```
 
-Essas classes adicionam capacidade de leitura e escrita de tipos primitivos Java (`byte`, `int`, `long`) diretamente sobre o stream de bytes do socket, sem alocações intermediárias desnecessárias.
+Esses streams são inicializados no construtor de `ClientHandler`, não em `run()`. Isso é necessário porque `ServerChat.broadcast()` acessa `getOutputStream()` logo após a conexão ser aceita — potencialmente antes de a nova thread ser escalonada pela JVM para executar `run()`. Inicializar no construtor garante que `out` nunca seja `null` quando um broadcast tenta usá-lo.
 
 Para a transferência de arquivos, o `ClientHandler` lê e transmite o conteúdo em *chunks* de tamanho fixo definido por `Protocol.CHUNK_SIZE` (8 KB):
 
@@ -188,7 +196,7 @@ Para a transferência de arquivos, o `ClientHandler` lê e transmite o conteúdo
 byte[] buffer = new byte[Protocol.CHUNK_SIZE];
 int bytesRead;
 while ((bytesRead = fis.read(buffer)) != -1) {
-    Frame.writeBinaryFrame(out, Protocol.FRAME_FILE_DATA, buffer, 0, bytesRead);
+    Frame.writeBinaryFrame(out, buffer, 0, bytesRead);
 }
 ```
 
@@ -198,7 +206,7 @@ Esse padrão tem duas consequências importantes para o gerenciamento de memóri
 
 **Limite de memória proporcional ao número de clientes, não ao tamanho dos arquivos.** Com *N* clientes transferindo arquivos simultaneamente, o consumo de memória de buffers é *N* × 8 KB — um valor previsível e controlado.
 
-O mesmo padrão é aplicado no cálculo do hash SHA-256: o `MessageDigest` é alimentado bloco a bloco com os mesmos 8 KB, calculando o hash incremental sem precisar do arquivo completo na RAM.
+O mesmo padrão é aplicado no cálculo do hash SHA-256: o `MessageDigest` é alimentado bloco a bloco com os mesmos 8 KB, calculando o hash incremental sem precisar do arquivo completo na RAM. Ambos os `FileInputStream` — em `sendFile` e em `calculateSHA256` — são abertos com `try-with-resources`, garantindo que o descritor de arquivo seja fechado mesmo em caso de exceção durante a transferência.
 
 ---
 
@@ -206,21 +214,20 @@ O mesmo padrão é aplicado no cálculo do hash SHA-256: o `MessageDigest` é al
 
 ### 6.1 Por que TCP sozinho não basta
 
-O TCP é um protocolo de **fluxo de bytes** (*byte stream*). Ele garante entrega ordenada e sem perdas, mas não preserva fronteiras entre transmissões. Quando o servidor executa:
+O TCP é um protocolo de **fluxo de bytes** (*byte stream*). Ele garante entrega ordenada e sem perdas, mas não preserva fronteiras entre transmissões. Quando o servidor executa dois envios consecutivos:
 
 ```java
-out.writeUTF("OK");
-out.writeUTF("a3f2...hash");
-out.writeLong(2048);
+out.write("OK".getBytes());
+out.write(hashBytes);
 ```
 
-...esses três envios podem ser entregues ao cliente como um único segmento TCP, dois segmentos separados em qualquer ponto de quebra, ou até fragmentados diferentemente dependendo do estado da rede. O cliente não consegue inferir onde termina `"OK"` e começa o hash apenas observando os bytes.
+...esses dois envios podem ser entregues ao cliente como um único segmento TCP, como dois segmentos separados, ou fragmentados em qualquer ponto dependendo do estado da rede. O cliente não consegue inferir onde termina `"OK"` e começa o hash apenas observando os bytes.
 
-Esse problema se aprofunda quando dois tipos de dados qualitativamente diferentes precisam coexistir no mesmo stream: respostas a comandos de arquivo e mensagens de chat assíncronas. Sem um mecanismo que identifique o tipo de dado antes de seu conteúdo, o cliente não sabe se os próximos bytes são a confirmação de um download ou uma notificação de evento.
+O problema se torna crítico quando dois tipos de dado qualitativamente diferentes precisam coexistir no mesmo stream: mensagens de texto e chunks binários de arquivo. Sem um mecanismo que identifique o tipo de dado antes de seu conteúdo, o cliente não sabe se os próximos bytes são texto a exibir ou dados binários a gravar em disco.
 
 ### 6.2 Estrutura do frame
 
-A solução adotada é um esquema de *framing* simples com três campos:
+A solução adotada é um esquema de *framing* com três campos:
 
 ```
 ┌────────────┬──────────────────────────┬────────────────────────────────┐
@@ -239,16 +246,19 @@ Esse esquema é uma instância do padrão *length-prefix framing* (ou *TLV — T
 
 ### 6.3 Tipos de frame definidos
 
+O protocolo define apenas três tipos de frame, suficientes para separar texto de dados binários:
+
 | Constante | Valor | Uso |
 |---|---|---|
-| `FRAME_CMD` | `0x01` | Comandos de controle e respostas textuais (`GET`, `EXIT`, `OK`, `ERROR`) |
+| `FRAME_MSG` | `0x01` | Toda comunicação textual: mensagens do cliente, respostas e notificações do servidor |
 | `FRAME_FILE_DATA` | `0x02` | Chunk de dados binários de um arquivo em transferência |
-| `FRAME_CHAT_MSG` | `0x03` | Mensagem de chat enviada pelo servidor ao cliente |
-| `FRAME_FILE_END` | `0x04` | Frame vazio sinalizando o fim de uma transferência de arquivo |
+| `FRAME_FILE_END` | `0x03` | Frame vazio sinalizando o fim de uma transferência de arquivo |
+
+A simplificação para um único tipo de frame textual (`FRAME_MSG`) é intencional. Do ponto de vista do protocolo de transporte, não importa se o texto é um comando, uma resposta ou uma notificação — todos são texto UTF-8 e todos são tratados da mesma forma pelo leitor. A distinção semântica é responsabilidade da camada de aplicação, não do framing.
 
 ### 6.4 A classe `Frame` como camada de serialização
 
-A classe `Frame` isola completamente o restante do código dos detalhes do protocolo binário. Os métodos `writeTextFrame`, `writeBinaryFrame` e `writeEmptyFrame` garantem que tipo, tamanho e payload sejam sempre escritos na ordem correta e de forma atômica do ponto de vista do chamador. Os métodos `readFrameType`, `readTextPayload` e `skipPayload` fazem o caminho inverso.
+A classe `Frame` isola completamente o restante do código dos detalhes do protocolo binário. Os métodos `writeMsgFrame`, `writeBinaryFrame` e `writeFileEndFrame` garantem que tipo, tamanho e payload sejam sempre escritos na ordem correta. Os métodos `readFrameType`, `readMsgPayload` e `skipPayload` fazem o caminho inverso.
 
 O método `readFully` é usado intencionalmente na leitura do payload:
 
@@ -257,6 +267,19 @@ in.readFully(payload); // Garante leitura completa, mesmo em rede lenta
 ```
 
 A alternativa, `in.read(payload)`, pode retornar com menos bytes do que o solicitado caso o sistema operacional ainda não tenha recebido o restante do segmento TCP — comportamento correto do ponto de vista da API, mas que produziria um payload truncado. `readFully` bloqueia até que todos os `length` bytes estejam disponíveis, garantindo a integridade do frame.
+
+O método `skipPayload` usa um loop explícito em vez de `skipBytes`, pois `skipBytes` não garante que todos os bytes serão descartados — ele pode retornar antecipadamente em redes lentas, deixando o stream desincronizado:
+
+```java
+public static void skipPayload(DataInputStream in) throws IOException {
+    int remaining = in.readInt();
+    while (remaining > 0) {
+        long skipped = in.skip(remaining);
+        if (skipped <= 0) break;
+        remaining -= (int) skipped;
+    }
+}
+```
 
 ---
 
@@ -275,21 +298,21 @@ Essa escolha é adequada para mensagens de notificação — eventos de conexão
 
 ### 7.2 Classificação das mensagens
 
-As mensagens do sistema se dividem em quatro categorias funcionais:
+As mensagens do sistema se dividem em quatro categorias funcionais. Todas trafegam como `FRAME_MSG` — a categoria é indicada pelo prefixo do texto, não pelo tipo do frame.
 
 **Respostas a comandos do cliente (unicast, sob demanda)**
 
-São mensagens enviadas para um único cliente, em resposta direta a um comando recebido. O cliente é o iniciador.
+Enviadas para um único cliente em resposta direta a um texto reconhecido como comando.
 
 | Comando recebido | Resposta enviada |
 |---|---|
 | `HELP` | Texto de ajuda descrevendo todos os comandos disponíveis |
 | `STATUS` | Número de clientes conectados e tempo de atividade formatado |
-| `GET <arquivo>` | `OK` + hash SHA-256 + tamanho + chunks do arquivo, ou `ERROR` + descrição |
+| `GET <arquivo>` | `[ARQUIVO] OK <hash> <tamanho>` seguido dos chunks binários, ou `[ERRO] <descrição>` |
 
 **Broadcasts engatilhados por eventos (multicast, assíncrono)**
 
-São enviados automaticamente quando um evento relevante ocorre no servidor, independentemente de qualquer requisição de cliente.
+Enviados automaticamente quando um evento relevante ocorre no servidor, independentemente de qualquer requisição de cliente.
 
 | Evento | Mensagem enviada |
 |---|---|
@@ -303,48 +326,53 @@ Enviados em intervalos regulares pela thread de broadcast, sem gatilho externo. 
 - `[ADMIN NOTICE] Servidor está ativo e funcionando normalmente.`
 - `[ADMIN NOTICE] Todas as conexões estão criptograficamente verificadas via SHA-256.`
 
-**Respostas de protocolo de arquivo (unicast, parte do handshake de transferência)**
+**Mensagens de erro (unicast, geradas pelo servidor)**
 
-São mensagens de controle trocadas como parte do fluxo de transferência de arquivo, distinguidas dos demais tipos pelo uso do frame `FRAME_CMD` em vez de `FRAME_CHAT_MSG`.
+Enviadas diretamente ao cliente que provocou o erro — tentativa de path traversal, arquivo inexistente, comando `GET` sem nome de arquivo.
+
+- `[ERRO] Acesso negado: caminho inválido.`
+- `[ERRO] Arquivo não encontrado: <nome>`
+- `[ERRO] Uso correto: GET <nome_do_arquivo>`
 
 ### 7.3 Fluxo de uma mensagem do servidor ao cliente
 
-Toda mensagem de chat percorre o seguinte caminho antes de chegar ao cliente:
+Toda mensagem percorre o seguinte caminho antes de chegar ao cliente:
 
 ```
 ServerChat.broadcast(texto)
     └── para cada handler em activeClients:
             ServerChat.sendMessage(handler.getOutputStream(), texto)
-                └── Frame.writeTextFrame(out, FRAME_CHAT_MSG, texto)
-                        ├── out.writeByte(0x03)
-                        ├── out.writeInt(texto.length em bytes UTF-8)
-                        └── out.write(bytes UTF-8 do texto)
+                └── Frame.writeMsgFrame(out, texto)
+                        ├── out.writeByte(0x01)          ← FRAME_MSG
+                        ├── out.writeInt(bytes.length)   ← tamanho do payload
+                        └── out.write(bytes UTF-8)       ← payload
 ```
 
-O cliente, ao ler do stream, encontra o byte `0x03` como tipo de frame, sabe que o payload é uma mensagem de chat, lê o tamanho e então o texto — sem qualquer ambiguidade com dados de arquivo ou respostas a comandos.
+O cliente, ao ler do stream, encontra `0x01` como tipo de frame, sabe que o payload é texto, lê o tamanho e então a string — sem qualquer ambiguidade com dados binários de arquivo.
 
 ---
 
-## 8. Protocolo de Comunicação Completo
+## 8. Interpretação de Comandos no Servidor
 
-### 8.1 Comandos recebidos pelo servidor
+O cliente envia texto livre. O servidor, ao receber um `FRAME_MSG`, passa o texto para `dispatch()` em `ClientHandler`, que verifica se o texto corresponde a algum comando conhecido.
 
-Todos os comandos do cliente são enviados como payload de um frame `FRAME_CMD` (`0x01`).
+### 8.1 Comandos reconhecidos
 
-| Comando | Frame(s) enviado(s) pelo cliente | Descrição |
-|---|---|---|
-| `GET` | `FRAME_CMD("GET")` seguido de `FRAME_CMD("<nome_do_arquivo>")` | Solicita o download de um arquivo |
-| `EXIT` | `FRAME_CMD("EXIT")` | Encerra a sessão graciosamente |
-| `HELP` | `FRAME_CMD("HELP")` | Solicita o texto de ajuda |
-| `STATUS` | `FRAME_CMD("STATUS")` | Solicita métricas do servidor |
+| Texto enviado pelo cliente | Ação executada pelo servidor |
+|---|---|
+| `GET <nome_do_arquivo>` | Valida o caminho, calcula hash e envia o arquivo em chunks |
+| `EXIT` | Encerra a sessão graciosamente |
+| `HELP` | Envia o texto de ajuda via `ServerChat` |
+| `STATUS` | Envia métricas do servidor via `ServerChat` |
+| Qualquer outro texto | Registrado no log do servidor como mensagem não reconhecida |
+
+A comparação ignora maiúsculas/minúsculas (`equalsIgnoreCase`). O argumento do `GET` é extraído subtraindo o prefixo `"GET "` do texto recebido, sem exigir que o cliente formate o comando de nenhuma forma especial além do espaço separador.
 
 ### 8.2 Respostas e mensagens enviadas pelo servidor
 
 **Em resposta a `GET` (sucesso):**
 ```
-FRAME_CMD("OK")
-FRAME_CMD("<hash SHA-256 em hexadecimal>")
-writeLong(<tamanho total em bytes>)
+FRAME_MSG("[ARQUIVO] OK <hash-sha256> <tamanho-em-bytes>")
 FRAME_FILE_DATA(<chunk 0>)
 FRAME_FILE_DATA(<chunk 1>)
 ...
@@ -353,19 +381,17 @@ FRAME_FILE_END
 
 **Em resposta a `GET` (falha):**
 ```
-FRAME_CMD("ERROR")
-FRAME_CMD("<mensagem de erro descritiva>")
+FRAME_MSG("[ERRO] <mensagem descritiva>")
 ```
 
 **Em resposta a `HELP` ou `STATUS`:**
 ```
-FRAME_CMD("OK")       ← confirmação de comando reconhecido (apenas HELP)
-FRAME_CHAT_MSG("<texto da resposta>")
+FRAME_MSG("<texto da resposta>")
 ```
 
-**Mensagens assíncronas (broadcast):**
+**Mensagens assíncronas de broadcast:**
 ```
-FRAME_CHAT_MSG("<prefixo> <conteúdo>")
+FRAME_MSG("[ADMIN NOTICE] <texto>" | "[EVENT] <texto>")
 ```
 
 ---
@@ -391,18 +417,20 @@ if (!requestedFile.getPath().startsWith(rootDir.getPath())) {
 
 ## 10. Verificação de Integridade via SHA-256
 
-Antes de transmitir um arquivo, o servidor calcula seu hash SHA-256 completo e o envia ao cliente como parte do cabeçalho da transferência. O cliente pode, após receber todos os bytes, calcular o hash do arquivo recebido e compará-lo com o valor recebido.
+Antes de transmitir um arquivo, o servidor calcula seu hash SHA-256 completo e o envia ao cliente como parte da mensagem de metadados que precede os chunks. O cliente pode, após receber todos os bytes, calcular o hash do arquivo recebido e compará-lo com o valor recebido.
 
 O cálculo é feito de forma incremental, alimentando o `MessageDigest` bloco a bloco com os mesmos 8 KB usados na transferência:
 
 ```java
 MessageDigest digest = MessageDigest.getInstance("SHA-256");
-while ((bytesRead = fis.read(buffer)) != -1) {
-    digest.update(buffer, 0, bytesRead);
+try (FileInputStream fis = new FileInputStream(file)) {
+    while ((bytesRead = fis.read(buffer)) != -1) {
+        digest.update(buffer, 0, bytesRead);
+    }
 }
 byte[] hashBytes = digest.digest();
 ```
 
 Isso garante que o consumo de memória durante o cálculo do hash seja idêntico ao da transferência: constante e limitado a 8 KB, independentemente do tamanho do arquivo.
 
-A verificação via SHA-256 detecta tanto corrupção acidental de dados em trânsito quanto modificações maliciosas no arquivo entre o cálculo do hash e o recebimento pelo cliente — o que o prefixo `[ADMIN NOTICE] Todas as conexões estão criptograficamente verificadas via SHA-256` anuncia periodicamente aos clientes conectados.
+A verificação via SHA-256 detecta tanto corrupção acidental de dados em trânsito quanto modificações no arquivo entre o momento do cálculo e o recebimento pelo cliente — o que o aviso periódico `[ADMIN NOTICE] Todas as conexões estão criptograficamente verificadas via SHA-256` anuncia aos clientes conectados.
