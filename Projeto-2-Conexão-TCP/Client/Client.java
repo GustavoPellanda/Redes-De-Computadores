@@ -3,38 +3,43 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.Socket;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Scanner;
+import java.util.concurrent.SynchronousQueue;
 
+import Protocol.Frame;
 import Protocol.Protocol;
 
 /*
- * Cliente TCP de transferência de arquivos.
+ * Cliente TCP com menu interativo, transferência de arquivos e chat bidirecional.
  *
- * Conecta-se ao servidor em uma porta fixa, solicita arquivos pelo nome via
- * comando GET e os salva localmente com o prefixo "received_". Após receber
- * cada arquivo, recalcula o SHA-256 localmente e compara com o hash enviado
- * pelo servidor para confirmar a integridade da transferência.
+ * Opera com duas threads:
  *
- * O loop principal continua até o usuário digitar o comando de saída, momento
- * em que o cliente envia EXIT ao servidor antes de fechar a conexão.
- */
+ *   Thread principal (main) — menu e entrada do usuário:
+ *     Exibe o menu, lê a escolha do usuário, escreve frames no stream de saída
+ *     e, quando aguarda resposta do servidor (ex.: durante um GET), bloqueia em
+ *     responseQueue.take() até que StreamReader deposite o sinal correspondente.
+ *
+ *   Thread leitora (StreamReader) — leitura contínua do stream:
+ *     Lê frames do stream de entrada em loop. Mensagens comuns são impressas no
+ *     console. Metadados de arquivo e sinais de fim de transferência são
+ *     depositados na responseQueue para consumo pela thread principal.
+*/
 
 public class Client {
 
-    private final String serverHost; // Host do servidor informado pelo usuário
-    private final int serverPort;    // Porta do servidor
+    private final String serverHost;    // Host do servidor informado pelo usuário
+    private final int serverPort;       // Porta do servidor
+    private final Socket socket;        // Socket TCP do cliente
+    private final DataInputStream in;   // Stream de leitura — usado exclusivamente por StreamReader
+    private final DataOutputStream out; // Stream de escrita — usado exclusivamente pela thread principal
+    private final Scanner scanner;      // Leitura da entrada do usuário no console
 
-    private static final String EXIT_COMMAND = "sair"; // Comando que encerra o cliente
-
-    private Socket socket;         // Socket TCP do cliente
-    private DataInputStream in;    // Stream de leitura de dados primitivos do servidor
-    private DataOutputStream out;  // Stream de escrita de dados primitivos para o servidor
-    private final Scanner scanner; // Leitura da entrada do usuário no console
+    // Canal de comunicação entre StreamReader e a thread principal — usado para coordenar o fluxo de um download:
+    private final SynchronousQueue<String> responseQueue = new SynchronousQueue<>();
 
     public Client() throws IOException {
         this.scanner = new Scanner(System.in);
@@ -50,82 +55,99 @@ public class Client {
             throw new IllegalArgumentException("Porta inválida: " + serverPort);
         }
 
-        // Abre a conexão TCP com o servidor:
+        // Abre a conexão TCP com o servidor e inicializa os streams:
         this.socket = new Socket(serverHost, serverPort);
         this.in = new DataInputStream(socket.getInputStream());
         this.out = new DataOutputStream(socket.getOutputStream());
     }
 
-    // ---- Envio de comandos ----
-
-    // Envia o comando GET seguido do nome do arquivo:
-    private void sendGet(String filename) throws IOException {
-        out.writeUTF(Protocol.CMD_GET);
-        out.writeUTF(filename);
-        out.flush();
+    // Exibe o menu principal e retorna a opção escolhida pelo usuário:
+    private String showMenu() {
+        System.out.println("\n╔══════════════════════════════╗");
+        System.out.println("║     SERVIDOR DE ARQUIVOS     ║");
+        System.out.println("╠══════════════════════════════╣");
+        System.out.println("║  1 - Baixar arquivo          ║");
+        System.out.println("║  2 - Chat                    ║");
+        System.out.println("║  3 - Sair                    ║");
+        System.out.println("╚══════════════════════════════╝");
+        System.out.print("Escolha: ");
+        return scanner.nextLine().trim();
     }
 
-    // Envia o comando de encerramento ao servidor:
-    private void sendExit() throws IOException {
-        out.writeUTF(Protocol.CMD_EXIT);
-        out.flush();
+    // Envia uma mensagem de texto ao servidor:
+    private void sendMsg(String text) throws IOException {
+        Frame.writeMsgFrame(out, text);
     }
 
-    // ---- Recepção e processamento da resposta ----
+    // Administra o processo de download de um arquivo:
+    private void handleDownload(StreamReader streamReader) throws IOException {
+        System.out.print("[Cliente] Nome do arquivo: ");
+        String filename = scanner.nextLine().trim();
 
-    // Lê a resposta do servidor após um GET e delega ao handler adequado:
-    private void handleServerResponse(String filename) throws IOException {
-        String response = in.readUTF(); // OK ou ERROR
-
-        if (response.equals(Protocol.RESP_ERROR)) {
-            String errorMsg = in.readUTF();
-            System.out.println("[Cliente] Erro do servidor: " + errorMsg);
+        if (filename.isEmpty()) {
+            System.out.println("[Cliente] Nome do arquivo não pode ser vazio.");
             return;
         }
 
-        if (response.equals(Protocol.RESP_OK)) {
-            String expectedHash = in.readUTF(); // Hash SHA-256 calculado pelo servidor
-            long fileSize = in.readLong(); // Tamanho total do arquivo em bytes
+        sendMsg(Protocol.CMD_GET + " " + filename);
+
+        // Aguarda StreamReader identificar a resposta do servidor:
+        String signal = awaitResponse();
+
+        if (signal.startsWith("__FILE_ERROR__")) {
+            System.out.println("[Cliente] " + signal.substring("__FILE_ERROR__".length()).trim());
+            return;
+        }
+
+        // Verifica se o sinal recebido contém os metadados do arquivo e inicia a transferência:
+        if (signal.startsWith("__FILE_META__")) {
+            // Formato: "__FILE_META__ <hash> <tamanho>"
+            String[] parts = signal.substring("__FILE_META__".length()).trim().split(" ", 2);
+            String expectedHash = parts[0];
+            long fileSize = Long.parseLong(parts[1]);
 
             System.out.println("[Cliente] Servidor confirmou arquivo. Tamanho: " + fileSize + " bytes");
             System.out.println("[Cliente] Hash esperado: " + expectedHash);
 
-            receiveFile(filename, fileSize, expectedHash);
+            // Prepara StreamReader para receber e gravar os chunks do arquivo:
+            streamReader.beginFileTransfer(filename, fileSize);
+
+            // Aguarda StreamReader sinalizar que todos os chunks foram recebidos e o arquivo foi fechado:
+            awaitResponse(); // Consome __FILE_DONE__
+
+            String outputPath = "received_" + filename;
+            System.out.println("[Cliente] Arquivo salvo como: " + outputPath);
+
+            // Verifica a integridade recalculando o SHA-256 do arquivo recebido:
+            verifyIntegrity(outputPath, expectedHash);
         }
     }
+            
+    // Administra o modo chat:
+    private void handleChat() throws IOException {
+        System.out.println("[Chat] Modo chat ativo. Digite 'sair' para voltar ao menu.");
+        System.out.println("[Chat] Comandos disponíveis: HELP, STATUS, EXIT (encerra o cliente).");
 
-    // Recebe os chunks do arquivo, monta o arquivo em disco e verifica a integridade:
-    private void receiveFile(String filename, long fileSize, String expectedHash) throws IOException {
-        String outputPath = "received_" + filename;
-
-        FileOutputStream fos = new FileOutputStream(outputPath);
-        long received = 0;
-        int chunkIndex = 0;
-
-        // Lê chunks até encontrar o sentinela (-1 no campo de tamanho):
+        // Loop de leitura do chat — bloqueia em scanner.nextLine() até o usuário digitar algo:
         while (true) {
-            int chunkSize = in.readInt(); // Tamanho do próximo chunk, ou -1 se acabou
+            System.out.print("> ");
+            String input = scanner.nextLine().trim();
 
-            if (chunkSize == -1) {
-                System.out.println("[Cliente] Transferência concluída — todos os chunks recebidos.");
+            if (input.isEmpty()) continue;
+
+            // Permite ao usuário sair do modo chat sem encerrar o cliente inteiro:
+            if (input.equalsIgnoreCase("sair")) {
+                System.out.println("[Chat] Saindo do modo chat.");
                 break;
             }
 
-            byte[] buffer = new byte[chunkSize];
-            in.readFully(buffer); // Garante a leitura de exatamente chunkSize bytes, sem leituras parciais
-            fos.write(buffer);
+            sendMsg(input);
 
-            received += chunkSize;
-            System.out.println("[Cliente] chunk " + chunkIndex + " recebido (" + chunkSize + " bytes) | " + received + "/" + fileSize + " bytes");
-            chunkIndex++;
+            // Se o usuário digitou EXIT, a thread principal deve encerrar o cliente inteiro:
+            if (input.equalsIgnoreCase(Protocol.CMD_EXIT)) {
+                throw new IOException("__EXIT__");
+            }
         }
-
-        fos.close();
-
-        System.out.println("[Cliente] Arquivo salvo como: " + outputPath);
-
-        // Verifica a integridade recalculando o SHA-256 do arquivo recebido:
-        verifyIntegrity(outputPath, expectedHash);
     }
 
     // Calcula o SHA-256 do arquivo salvo e compara com o hash enviado pelo servidor:
@@ -141,21 +163,19 @@ public class Client {
         }
     }
 
-    // Calcula o hash SHA-256 do arquivo lendo-o em blocos de CHUNK_SIZE bytes,
-    // evitando carregar o arquivo inteiro na memória:
+    // Calcula o hash SHA-256 do arquivo lendo-o em blocos de CHUNK_SIZE bytes:
     private String calculateSHA256(File file) throws IOException {
         try {
             MessageDigest digest = MessageDigest.getInstance(Protocol.HASH_ALGORITHM);
-            FileInputStream fis = new FileInputStream(file);
             byte[] buffer = new byte[Protocol.CHUNK_SIZE];
             int bytesRead;
 
-            // Alimenta o digest incrementalmente, bloco a bloco:
-            while ((bytesRead = fis.read(buffer)) != -1) {
-                digest.update(buffer, 0, bytesRead);
+            // Alimenta o digest incrementalmente, bloco a bloco, sem carregar o arquivo na RAM:
+            try (FileInputStream fis = new FileInputStream(file)) {
+                while ((bytesRead = fis.read(buffer)) != -1) {
+                    digest.update(buffer, 0, bytesRead);
+                }
             }
-
-            fis.close();
 
             // Converte o array de bytes do digest para uma string hexadecimal legível:
             byte[] hashBytes = digest.digest();
@@ -170,16 +190,23 @@ public class Client {
         }
     }
 
-    // ---- Controle do console ----
-
-    // Lê uma linha digitada pelo usuário:
-    private String readUserInput() {
-        System.out.print("> ");
-        return scanner.nextLine().trim();
+    // Aguarda um sinal específico de StreamReader depositar na responseQueue:
+    private String awaitResponse() throws IOException {
+        try {
+            String signal = responseQueue.take();
+            if ("__CONNECTION_CLOSED__".equals(signal)) {
+                throw new IOException("Conexão encerrada pelo servidor enquanto aguardava resposta.");
+            }
+            return signal;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Espera interrompida.", e);
+        }
     }
 
-    // Fecha a conexão e libera os recursos:
-    private void close() {
+    // Encerra a conexão e limpa os recursos:
+    private void close(StreamReader streamReader) {
+        streamReader.stop();
         try {
             socket.close();
         } catch (IOException e) {
@@ -189,40 +216,53 @@ public class Client {
         System.out.println("[Cliente] Encerrado.");
     }
 
-    // Loop principal do cliente:
+    // Inicia o cliente, a thread leitora e gerencia o menu principal:
     public void start() {
         System.out.println("[Cliente] Conectado a " + serverHost + ":" + serverPort);
-        System.out.println("[Cliente] Digite o nome do arquivo que deseja buscar (ou '" + EXIT_COMMAND + "' para encerrar):");
+
+        // Instancia e inicia a thread leitora:
+        StreamReader streamReader = new StreamReader(in, responseQueue);
+        Thread readerThread = new Thread(streamReader, "stream-reader");
+        readerThread.setDaemon(true); // Encerra junto com a JVM caso o loop principal saia
+        readerThread.start();
 
         while (true) {
-            String input = readUserInput();
-
-            if (input.equalsIgnoreCase(EXIT_COMMAND)) {
-                try {
-                    sendExit(); // Avisa o servidor antes de fechar
-                } catch (IOException e) {
-                    System.err.println("[Cliente] Erro ao enviar EXIT: " + e.getMessage());
-                }
-                break;
-            }
-
-            if (input.isEmpty()) continue;
-
+            String choice = showMenu();
             try {
-                sendGet(input);
-                handleServerResponse(input);
+                switch (choice) {
+                    case "1":
+                        handleDownload(streamReader);
+                        break;
+                    case "2":
+                        handleChat();
+                        break;
+                    case "3":
+                        // Avisa o servidor que o cliente está saindo:
+                        try { 
+                            sendMsg(Protocol.CMD_EXIT); 
+                        } catch (IOException ignored) {}
+                        close(streamReader);
+                        return;
+                    default:
+                        System.out.println("[Cliente] Opção inválida. Digite 1, 2 ou 3.");
+                        break;
+                }
+
             } catch (IOException e) {
+                if ("__EXIT__".equals(e.getMessage())) {
+                    // EXIT digitado no chat — encerra normalmente:
+                    close(streamReader);
+                    return;
+                }
                 System.err.println("[Cliente] Erro de I/O: " + e.getMessage());
-                break; // Conexão perdida — encerra o loop
+                close(streamReader);
+                return;
             }
         }
-
-        close();
     }
 
     public static void main(String[] args) throws IOException {
         Client client = new Client();
         client.start();
     }
-
 }
