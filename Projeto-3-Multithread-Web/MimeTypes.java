@@ -20,6 +20,7 @@ public class MimeTypes {
         if (lower.endsWith(".ico"))  return "image/x-icon";
         if (lower.endsWith(".svg"))  return "image/svg+xml";
         if (lower.endsWith(".pdf"))  return "application/pdf";
+        if (lower.endsWith(".ico"))  return "image/x-icon";
 
         return "application/octet-stream"; // Tipo genérico para arquivos binários desconhecidos
     }
