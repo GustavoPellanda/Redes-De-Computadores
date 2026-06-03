@@ -1,5 +1,5 @@
 /*
- * Classe utilitária para mapear extensões de arquivos para seus respectivos Content-Types, e para determinar se um Content-Type é de texto ou binário. 
+ * Classe utilitária para mapear extensões de arquivos a seus respectivos Content-Types.
 */
 
 public class MimeTypes {
@@ -20,17 +20,8 @@ public class MimeTypes {
         if (lower.endsWith(".ico"))  return "image/x-icon";
         if (lower.endsWith(".svg"))  return "image/svg+xml";
         if (lower.endsWith(".pdf"))  return "application/pdf";
-        if (lower.endsWith(".ico"))  return "image/x-icon";
+        if (lower.endsWith(".mp4"))  return "video/mp4";
 
         return "application/octet-stream"; // Tipo genérico para arquivos binários desconhecidos
-    }
-
-    // Determina se um Content-Type é de texto, para decidir se o arquivo deve ser lido como String ou bytes:
-    public static boolean isText(String contentType) {
-        return contentType.startsWith("text/") ||
-               contentType.startsWith("application/javascript") ||
-               contentType.startsWith("application/json") ||
-               contentType.startsWith("application/xml") ||
-               contentType.startsWith("image/svg");
     }
 }

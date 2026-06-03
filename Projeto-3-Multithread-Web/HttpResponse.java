@@ -3,6 +3,9 @@ import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.ZonedDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 
 /*
  * Classe utilitária responsável pela construção e envio de respostas HTTP.
@@ -53,14 +56,19 @@ public class HttpResponse {
 
     // Constrói os bytes dos cabeçalhos HTTP para a resposta, incluindo status, Content-Type e Content-Length:
     private byte[] buildHeaders(int statusCode, String statusText, String contentType, long contentLength) {
+
+        // Gera a data atual no formato RFC 1123 exigido pelo protocolo HTTP:
+        String date = ZonedDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.RFC_1123_DATE_TIME);
+
         String headers =
             "HTTP/1.1 " + statusCode + " " + statusText + "\r\n" +
+            "Date: " + date + "\r\n" + 
+            "Server: ServidorHTTP/1.0\r\n" +
             "Content-Type: "   + contentType   + "\r\n" +
             "Content-Length: " + contentLength + "\r\n" +
             "Connection: close\r\n" + // Encerra a conexão TCP após o envio — dispensa implementação de keep-alive
             "\r\n";                   // Linha em branco obrigatória: separa cabeçalhos do corpo
 
-        return headers.getBytes(StandardCharsets.UTF_8);
+        return headers.getBytes(StandardCharsets.US_ASCII);
     }
-
 }
