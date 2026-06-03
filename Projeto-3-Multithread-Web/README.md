@@ -121,9 +121,7 @@ O servidor adota um subconjunto simplificado do HTTP/1.1, suficiente para os req
 |---|---|
 | Método suportado | GET |
 | Versão do protocolo | HTTP/1.1 (sintaxe de resposta) |
-| Cabeçalhos enviados                                                     |
-| ----------------------------------------------------------------------- |
-| `Date`, `Server`, `Content-Type`, `Content-Length`, `Connection: close` |
+| Cabeçalhos enviados | `Date`, `Server`, `Content-Type`, `Content-Length`, `Connection: close` |
 | Códigos de status | 200, 403, 404, 405 |
 | Conexões persistentes | Não implementado — `Connection: close` após cada resposta |
 | Chunked transfer encoding | Não implementado — `Content-Length` exato obrigatório |
