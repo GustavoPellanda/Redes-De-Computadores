@@ -84,7 +84,7 @@ Classe utilitária responsável pela construção e envio de respostas HTTP. Nã
 
 **Responsabilidades:**
 
-- Montar o bloco de cabeçalhos HTTP com terminadores CRLF (`\r\n`), obrigatórios pelo RFC 7230.
+- Montar o bloco de cabeçalhos HTTP com terminadores CRLF (\r\n), exigidos pela especificação HTTP/1.1
 - Calcular `Content-Length` sobre o número de bytes do corpo — não sobre o número de caracteres — para garantir valor exato com strings contendo caracteres multibyte (acentos, símbolos).
 - Enviar respostas 200 OK com o conteúdo de um arquivo, lido em chunks de 8 KB diretamente no `OutputStream` do socket sem conversão de charset, preservando bytes binários intactos.
 - Enviar respostas de erro com página HTML gerada em memória.
@@ -121,7 +121,9 @@ O servidor adota um subconjunto simplificado do HTTP/1.1, suficiente para os req
 |---|---|
 | Método suportado | GET |
 | Versão do protocolo | HTTP/1.1 (sintaxe de resposta) |
-| Cabeçalhos enviados | `Content-Type`, `Content-Length`, `Connection: close` |
+| Cabeçalhos enviados                                                     |
+| ----------------------------------------------------------------------- |
+| `Date`, `Server`, `Content-Type`, `Content-Length`, `Connection: close` |
 | Códigos de status | 200, 403, 404, 405 |
 | Conexões persistentes | Não implementado — `Connection: close` após cada resposta |
 | Chunked transfer encoding | Não implementado — `Content-Length` exato obrigatório |
